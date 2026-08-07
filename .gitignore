@@ -1,0 +1,10 @@
+# VS Code IntelliSense onbellegi ve makineye ozel yollar iceren uretilmis config
+.vscode/browse.vc.db*
+.vscode/.browse.c_cpp.db*
+.vscode/ipch/
+.vscode/c_cpp_properties.json
+
+# ROS 2 colcon ciktilari
+oamr-ros2-ws/build/
+oamr-ros2-ws/install/
+oamr-ros2-ws/log/
