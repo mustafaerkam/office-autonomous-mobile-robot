@@ -3,23 +3,28 @@
 // suruldugunu degil, bilgisayarin ne istedigini ifade eder.
 #pragma once
 
-// Kullanici istegiyle enum class yerine #define kullaniliyor. Sayisal kimlikler
-// seri protokolun sabit sozlesmesidir; yeni bir komut eklenirken mevcut degerlerin
-// anlami degistirilmez. 0 degeri her zaman gecersiz/bilinmeyen komut icindir.
-#define COMMAND_INVALID             0U
-#define COMMAND_HELLO               1U
-#define COMMAND_PING                2U
-#define COMMAND_HELP                3U
-#define COMMAND_STATUS              4U
-#define COMMAND_TWIST               5U
-#define COMMAND_STOP                6U
-#define COMMAND_ARM                 7U
-#define COMMAND_DISARM              8U
-#define COMMAND_CALIBRATION_START   9U
-#define COMMAND_CALIBRATION_END     10U
-#define COMMAND_CALIBRATION_APPLY   11U
-#define COMMAND_SET_ENCODER_SIGNS   12U
-#define COMMAND_SET_PID_GAINS       13U
+// Bu karakterler PC'nin seri hattan gonderecegi gerçek kisa komutlardir. Ornegin
+// bilgisayar "t 0.30 0.50\n" gonderdiginde ilk karakter TWIST olur. Sayisal bir
+// ic kimlik katmani yoktur; parser bu karakteri Command.id alanina tasir. Uzun
+// komutlar (TWIST, STATUS gibi) ayni komutlarin geriye uyumlu alias'lari olarak kalir.
+#define COMMAND_INVALID          0U
+#define HELLO                    'v'
+#define PING                     'p'
+#define HELP                     'h'
+#define STATUS                   's'
+#define TWIST                    't'
+#define STOP                     'x'
+#define ARM                      'a'
+#define DISARM                   'd'
+#define CALIBRATION              'c'
+#define SET_ENCODER_SIGNS        'n'
+#define SET_PID_GAINS            'g'
+
+// CAL tek karakterli bir komuttur; ikinci kelime hangi kalibrasyon asamasinin
+// istendigini belirtir. Ornekler: "c start", "c end" ve "c apply".
+#define CALIBRATION_START        1U
+#define CALIBRATION_END          2U
+#define CALIBRATION_APPLY        3U
 
 // Sol ve sag teker indexleri seri mesajlarda veya dizi tabanli telemetry'de ayni
 // sirayi korur. Bu tanimlar pin numarasi degildir; yalniz mantiksal teker kimligidir.

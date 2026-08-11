@@ -124,12 +124,12 @@ bool writeMachineTelemetry(const uint32_t sequence, const bool nonBlocking)
 void printHelp()
 {
     Serial.println(F("\nINSAN TERMINAL KOMUTLARI:"));
-    Serial.println(F("  HELLO | PING | HELP | STATUS"));
-    Serial.println(F("  TWIST <linear_x[m/s]> <angular_z[rad/s]>"));
-    Serial.println(F("  STOP | ARM | DISARM"));
-    Serial.println(F("  CAL START | CAL END | CAL APPLY"));
-    Serial.println(F("  SIGN <-1|1> <-1|1>"));
-    Serial.println(F("  GAINS <Kp> <Ki> <Kd>"));
+    Serial.println(F("  HELLO(v) | PING(p) | HELP(h) | STATUS(s)"));
+    Serial.println(F("  TWIST/t <linear_x[m/s]> <angular_z[rad/s]>"));
+    Serial.println(F("  STOP(x) | ARM(a) | DISARM(d)"));
+    Serial.println(F("  CAL/c START | END | APPLY"));
+    Serial.println(F("  SIGN/n <-1|1> <-1|1>"));
+    Serial.println(F("  GAINS/g <Kp> <Ki> <Kd>"));
     Serial.println(F("\nMAKINE BICIMI:"));
     Serial.println(F("  V1 CMD <sequence> <yukaridaki-komut>"));
     Serial.println(F("  Ornek: V1 CMD 42 TWIST 0.30 0.50"));
@@ -296,23 +296,23 @@ uint8_t executeCommand(const SerialProtocol::Command &command)
 {
     switch (command.id)
     {
-    case COMMAND_HELLO:
+    case HELLO:
         Serial.printf("V%u HELLO OAMR_ESP32_LOW_LEVEL\n", PROTOCOL_VERSION);
         return PROTOCOL_ERROR_NONE;
 
-    case COMMAND_PING:
+    case PING:
         Serial.printf("V%u PONG %lu\n", PROTOCOL_VERSION,
                       static_cast<unsigned long>(millis()));
         return PROTOCOL_ERROR_NONE;
 
-    case COMMAND_HELP:
+    case HELP:
         if (!command.machineFormat)
         {
             printHelp();
         }
         return PROTOCOL_ERROR_NONE;
 
-    case COMMAND_STATUS:
+    case STATUS:
         if (command.machineFormat)
         {
             writeMachineTelemetry(command.sequence, false);
@@ -323,10 +323,10 @@ uint8_t executeCommand(const SerialProtocol::Command &command)
         }
         return PROTOCOL_ERROR_NONE;
 
-    case COMMAND_TWIST:
+    case TWIST:
         return executeTwist(command);
 
-    case COMMAND_STOP:
+    case STOP:
         MotorControl::stop();
         lastLinearXMps = 0.0F;
         lastAngularZRadS = 0.0F;
@@ -337,7 +337,7 @@ uint8_t executeCommand(const SerialProtocol::Command &command)
         }
         return PROTOCOL_ERROR_NONE;
 
-    case COMMAND_ARM:
+    case ARM:
         if (!MotorControl::arm())
         {
             return PROTOCOL_ERROR_FEEDBACK_NOT_READY;
@@ -348,7 +348,7 @@ uint8_t executeCommand(const SerialProtocol::Command &command)
         }
         return PROTOCOL_ERROR_NONE;
 
-    case COMMAND_DISARM:
+    case DISARM:
         MotorControl::disarm();
         if (!command.machineFormat)
         {
@@ -356,16 +356,22 @@ uint8_t executeCommand(const SerialProtocol::Command &command)
         }
         return PROTOCOL_ERROR_NONE;
 
-    case COMMAND_CALIBRATION_START:
-        return startCalibration(command);
+    case CALIBRATION:
+        if (command.firstInteger == CALIBRATION_START)
+        {
+            return startCalibration(command);
+        }
+        if (command.firstInteger == CALIBRATION_END)
+        {
+            return finishCalibration(command);
+        }
+        if (command.firstInteger == CALIBRATION_APPLY)
+        {
+            return applyCalibration(command);
+        }
+        return PROTOCOL_ERROR_FORMAT;
 
-    case COMMAND_CALIBRATION_END:
-        return finishCalibration(command);
-
-    case COMMAND_CALIBRATION_APPLY:
-        return applyCalibration(command);
-
-    case COMMAND_SET_ENCODER_SIGNS:
+    case SET_ENCODER_SIGNS:
         if (!MotorControl::setEncoderSigns(command.firstInteger, command.secondInteger))
         {
             return PROTOCOL_ERROR_INVALID_PARAMETER;
@@ -376,7 +382,7 @@ uint8_t executeCommand(const SerialProtocol::Command &command)
         }
         return PROTOCOL_ERROR_NONE;
 
-    case COMMAND_SET_PID_GAINS:
+    case SET_PID_GAINS:
         if (!MotorControl::setPidGains(command.firstFloat, command.secondFloat,
                                        command.thirdFloat))
         {

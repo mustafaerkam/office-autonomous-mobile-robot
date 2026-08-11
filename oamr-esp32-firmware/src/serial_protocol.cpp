@@ -19,18 +19,57 @@ ParseResult makeResult(const Command &command, const uint8_t errorCode)
     return ParseResult{command, errorCode};
 }
 
-bool hasOnlyTwoFiniteFloats(const char *text, float &first, float &second)
+// Kisa komut (t) ile uzun alias (TWIST) ayni sayisal kurali kullanir. Parser,
+// komut adindan sonraki bolumu alir; %c ile fazladan token olup olmadigini denetler.
+bool hasOnlyTwoFiniteFloats(const char *arguments, float &first, float &second)
 {
     char trailing = '\0';
-    return std::sscanf(text, "TWIST %f %f %c", &first, &second, &trailing) == 2 &&
+    return std::sscanf(arguments, " %f %f %c", &first, &second, &trailing) == 2 &&
            std::isfinite(first) && std::isfinite(second);
 }
 
-bool hasOnlyThreeFiniteFloats(const char *text, float &first, float &second, float &third)
+bool hasOnlyThreeFiniteFloats(const char *arguments, float &first, float &second, float &third)
 {
     char trailing = '\0';
-    return std::sscanf(text, "GAINS %f %f %f %c", &first, &second, &third, &trailing) == 3 &&
+    return std::sscanf(arguments, " %f %f %f %c", &first, &second, &third, &trailing) == 3 &&
            std::isfinite(first) && std::isfinite(second) && std::isfinite(third);
+}
+
+bool hasOnlyTwoSigns(const char *arguments, int8_t &first, int8_t &second)
+{
+    int firstSign = 0;
+    int secondSign = 0;
+    char trailing = '\0';
+    if (std::sscanf(arguments, " %d %d %c", &firstSign, &secondSign, &trailing) != 2 ||
+        (firstSign != -1 && firstSign != 1) ||
+        (secondSign != -1 && secondSign != 1))
+    {
+        return false;
+    }
+    first = static_cast<int8_t>(firstSign);
+    second = static_cast<int8_t>(secondSign);
+    return true;
+}
+
+bool parseCalibrationAction(const char *arguments, int8_t &action)
+{
+    if (std::strcmp(arguments, " START") == 0 || std::strcmp(arguments, " start") == 0)
+    {
+        action = CALIBRATION_START;
+    }
+    else if (std::strcmp(arguments, " END") == 0 || std::strcmp(arguments, " end") == 0)
+    {
+        action = CALIBRATION_END;
+    }
+    else if (std::strcmp(arguments, " APPLY") == 0 || std::strcmp(arguments, " apply") == 0)
+    {
+        action = CALIBRATION_APPLY;
+    }
+    else
+    {
+        return false;
+    }
+    return true;
 }
 
 // Insan ve makine formatinin ortak komut govdesi ayni fonksiyonda ayrıştırılır.
@@ -40,75 +79,123 @@ ParseResult parsePayload(const char *payload, Command command)
 {
     if (std::strcmp(payload, "HELLO") == 0)
     {
-        command.id = COMMAND_HELLO;
+        command.id = HELLO;
     }
     else if (std::strcmp(payload, "PING") == 0)
     {
-        command.id = COMMAND_PING;
+        command.id = PING;
     }
     else if (std::strcmp(payload, "HELP") == 0)
     {
-        command.id = COMMAND_HELP;
+        command.id = HELP;
     }
     else if (std::strcmp(payload, "STATUS") == 0)
     {
-        command.id = COMMAND_STATUS;
+        command.id = STATUS;
     }
     else if (std::strcmp(payload, "STOP") == 0)
     {
-        command.id = COMMAND_STOP;
+        command.id = STOP;
     }
     else if (std::strcmp(payload, "ARM") == 0)
     {
-        command.id = COMMAND_ARM;
+        command.id = ARM;
     }
     else if (std::strcmp(payload, "DISARM") == 0)
     {
-        command.id = COMMAND_DISARM;
-    }
-    else if (std::strcmp(payload, "CAL START") == 0)
-    {
-        command.id = COMMAND_CALIBRATION_START;
-    }
-    else if (std::strcmp(payload, "CAL END") == 0)
-    {
-        command.id = COMMAND_CALIBRATION_END;
-    }
-    else if (std::strcmp(payload, "CAL APPLY") == 0)
-    {
-        command.id = COMMAND_CALIBRATION_APPLY;
+        command.id = DISARM;
     }
     else if (std::strncmp(payload, "TWIST ", 6) == 0)
     {
-        if (!hasOnlyTwoFiniteFloats(payload, command.firstFloat, command.secondFloat))
+        if (!hasOnlyTwoFiniteFloats(payload + 5, command.firstFloat, command.secondFloat))
         {
             return makeResult(command, PROTOCOL_ERROR_FORMAT);
         }
-        command.id = COMMAND_TWIST;
+        command.id = TWIST;
     }
     else if (std::strncmp(payload, "SIGN ", 5) == 0)
     {
-        int firstSign = 0;
-        int secondSign = 0;
-        char trailing = '\0';
-        if (std::sscanf(payload, "SIGN %d %d %c", &firstSign, &secondSign, &trailing) != 2 ||
-            (firstSign != -1 && firstSign != 1) ||
-            (secondSign != -1 && secondSign != 1))
+        if (!hasOnlyTwoSigns(payload + 4, command.firstInteger, command.secondInteger))
         {
             return makeResult(command, PROTOCOL_ERROR_INVALID_PARAMETER);
         }
-        command.id = COMMAND_SET_ENCODER_SIGNS;
-        command.firstInteger = static_cast<int8_t>(firstSign);
-        command.secondInteger = static_cast<int8_t>(secondSign);
+        command.id = SET_ENCODER_SIGNS;
     }
     else if (std::strncmp(payload, "GAINS ", 6) == 0)
     {
-        if (!hasOnlyThreeFiniteFloats(payload, command.firstFloat,
+        if (!hasOnlyThreeFiniteFloats(payload + 5, command.firstFloat,
                                       command.secondFloat, command.thirdFloat))
         {
             return makeResult(command, PROTOCOL_ERROR_FORMAT);
         }
-        command.id = COMMAND_SET_PID_GAINS;
+        command.id = SET_PID_GAINS;
+    }
+    else if (std::strncmp(payload, "CAL ", 4) == 0)
+    {
+        if (!parseCalibrationAction(payload + 3, command.firstInteger))
+        {
+            return makeResult(command, PROTOCOL_ERROR_FORMAT);
+        }
+        command.id = CALIBRATION;
+    }
+    // Referanstaki commands.h mantigi: ilk karakter dogrudan seri komuttur.
+    // Bu blok, "t 0.30 0.50" gibi kisa komutlari uzun isimli alias'larla ayni
+    // Command yapisina donusturur. Boylece iki ayri motor kontrol yolu oluşmaz.
+    else if (payload[1] == '\0')
+    {
+        const char shortCommand = payload[0];
+        if (shortCommand == HELLO || shortCommand == PING || shortCommand == HELP ||
+            shortCommand == STATUS || shortCommand == STOP || shortCommand == ARM ||
+            shortCommand == DISARM)
+        {
+            command.id = static_cast<uint8_t>(shortCommand);
+        }
+        else
+        {
+            return makeResult(command, PROTOCOL_ERROR_UNKNOWN_COMMAND);
+        }
+    }
+    else if (payload[1] == ' ')
+    {
+        const char shortCommand = payload[0];
+        const char *arguments = payload + 1;
+        if (shortCommand == TWIST)
+        {
+            if (!hasOnlyTwoFiniteFloats(arguments, command.firstFloat, command.secondFloat))
+            {
+                return makeResult(command, PROTOCOL_ERROR_FORMAT);
+            }
+            command.id = TWIST;
+        }
+        else if (shortCommand == SET_ENCODER_SIGNS)
+        {
+            if (!hasOnlyTwoSigns(arguments, command.firstInteger, command.secondInteger))
+            {
+                return makeResult(command, PROTOCOL_ERROR_INVALID_PARAMETER);
+            }
+            command.id = SET_ENCODER_SIGNS;
+        }
+        else if (shortCommand == SET_PID_GAINS)
+        {
+            if (!hasOnlyThreeFiniteFloats(arguments, command.firstFloat,
+                                          command.secondFloat, command.thirdFloat))
+            {
+                return makeResult(command, PROTOCOL_ERROR_FORMAT);
+            }
+            command.id = SET_PID_GAINS;
+        }
+        else if (shortCommand == CALIBRATION)
+        {
+            if (!parseCalibrationAction(arguments, command.firstInteger))
+            {
+                return makeResult(command, PROTOCOL_ERROR_FORMAT);
+            }
+            command.id = CALIBRATION;
+        }
+        else
+        {
+            return makeResult(command, PROTOCOL_ERROR_UNKNOWN_COMMAND);
+        }
     }
     else
     {
@@ -161,19 +248,17 @@ const char *commandName(const uint8_t commandId)
 {
     switch (commandId)
     {
-    case COMMAND_HELLO: return "HELLO";
-    case COMMAND_PING: return "PING";
-    case COMMAND_HELP: return "HELP";
-    case COMMAND_STATUS: return "STATUS";
-    case COMMAND_TWIST: return "TWIST";
-    case COMMAND_STOP: return "STOP";
-    case COMMAND_ARM: return "ARM";
-    case COMMAND_DISARM: return "DISARM";
-    case COMMAND_CALIBRATION_START: return "CAL_START";
-    case COMMAND_CALIBRATION_END: return "CAL_END";
-    case COMMAND_CALIBRATION_APPLY: return "CAL_APPLY";
-    case COMMAND_SET_ENCODER_SIGNS: return "SIGN";
-    case COMMAND_SET_PID_GAINS: return "GAINS";
+    case HELLO: return "HELLO";
+    case PING: return "PING";
+    case HELP: return "HELP";
+    case STATUS: return "STATUS";
+    case TWIST: return "TWIST";
+    case STOP: return "STOP";
+    case ARM: return "ARM";
+    case DISARM: return "DISARM";
+    case CALIBRATION: return "CAL";
+    case SET_ENCODER_SIGNS: return "SIGN";
+    case SET_PID_GAINS: return "GAINS";
     default: return "INVALID";
     }
 }
