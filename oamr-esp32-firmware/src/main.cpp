@@ -2,38 +2,37 @@
 
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 
+#include "commands.h"
 #include "motor_control.h"
+#include "serial_protocol.h"
 #include "vehicle_kinematics.h"
 
 namespace
 {
-// Serial hizi bilgisayardaki monitor ayariyla ayni olmalidir. 115200 bit/s,
-// telemetry icin yeterince hizli ve ESP32 gelistirme kartlarinda yaygin bir degerdir.
+// Serial hizi bilgisayardaki monitor veya gelecekteki ROS 2 bridge ayariyla ayni
+// olmalidir. USB seri uzerinde 115200 baud, komut ve dusuk frekansli telemetry icin
+// yeterlidir; kontrol dongusunun hizi bundan bagimsiz olarak motor_control'dedir.
 constexpr uint32_t SERIAL_BAUD = 115200;
-
-// Sabit boyutlu satir tamponu dinamik String nesnelerinin heap parcalanmasi riskini
-// kaldirir. size_t negatif olamayan dizi boyutlari icin uygun unsigned tiptir.
-constexpr size_t COMMAND_BUFFER_SIZE = 96;
-char commandBuffer[COMMAND_BUFFER_SIZE] = {};
-size_t commandLength = 0;
-bool commandOverflow = false;
-
-// Telemetry kontrol dongusunden daha yavas tutulur. millis() ile zaman kontrolu
-// delay kullanmadan yapildigi icin encoder/PID dongusu seri yaziyi beklemez.
 constexpr uint32_t TELEMETRY_PERIOD_MS = 500;
-uint32_t lastTelemetryMs = 0;
+constexpr float CALIBRATION_TURNS = 10.0F;
 
-// Son komut degerlerini saklamak STATUS ciktisinda girdiden motora tum zinciri
-// gostermeyi saglar. Bunlar SI birimlerindedir: m/s ve rad/s.
+// Sabit boyutlu tampon dinamik String tahsisi yapmaz. Uzun veya bozuk bir satir
+// newline'a kadar atilir; parcasinin komut olarak calismasi engellenir.
+char commandBuffer[PROTOCOL_COMMAND_BUFFER_SIZE] = {};
+size_t commandLength = 0U;
+bool commandOverflow = false;
+bool commandMayBeMachineFormat = false;
+
+uint32_t lastTelemetryMs = 0U;
+uint32_t lastMachineSequence = 0U;
+
+// Son Twist degerleri STATUS ile tum donusum zincirini gostermek icin saklanir.
 float lastLinearXMps = 0.0F;
 float lastAngularZRadS = 0.0F;
 VehicleKinematics::Targets lastTargets{0.0F, 0.0F, 0.0F, true};
 
-// Kalibrasyon baslangic/bitis snapshot'lari motor surmeden, elle tam 10 turden
-// effective 1x counts-per-wheel-revolution hesaplamak icin tutulur.
-constexpr float CALIBRATION_TURNS = 10.0F;
+// CPR kalibrasyonu motor surmeden elle on tur sayim farkini olcmek icin durum tutar.
 bool calibrationActive = false;
 bool calibrationCandidateReady = false;
 int32_t calibrationStartLeft = 0;
@@ -41,141 +40,168 @@ int32_t calibrationStartRight = 0;
 float candidateLeftCpr = 0.0F;
 float candidateRightCpr = 0.0F;
 
+void writeMachineAcknowledgement(const SerialProtocol::Command &command)
+{
+    if (!command.machineFormat)
+    {
+        return;
+    }
+    Serial.printf("V%u ACK %lu %s\n", PROTOCOL_VERSION,
+                  static_cast<unsigned long>(command.sequence),
+                  SerialProtocol::commandName(command.id));
+}
+
+void writeMachineError(const SerialProtocol::Command &command, const uint8_t errorCode)
+{
+    if (command.machineFormat)
+    {
+        Serial.printf("V%u ERR %lu %s\n", PROTOCOL_VERSION,
+                      static_cast<unsigned long>(command.sequence),
+                      SerialProtocol::errorName(errorCode));
+        return;
+    }
+
+    // Insan terminali eski komut deneyimini koruyan aciklayici bir metin gorur;
+    // bridge ise bu dile baglanmadan yukaridaki sabit ERR adini kullanir.
+    switch (errorCode)
+    {
+    case PROTOCOL_ERROR_NOT_ARMED:
+        Serial.println(F("KINEMATIK HESAPLANDI; motor DISARM. STATUS ile sonucu gorun."));
+        break;
+    case PROTOCOL_ERROR_INVALID_KINEMATICS:
+        Serial.println(F("HATA: Ackermann arac v=0 iken wz!=0 donusu yapamaz. STOP."));
+        break;
+    case PROTOCOL_ERROR_FEEDBACK_NOT_READY:
+        Serial.println(F("HATA: ARM olmadi. CPR, SIGN ve GAINS eksik olabilir."));
+        break;
+    case PROTOCOL_ERROR_CALIBRATION_NOT_ACTIVE:
+        Serial.println(F("HATA: Once CAL START yazin."));
+        break;
+    case PROTOCOL_ERROR_CALIBRATION_NOT_READY:
+        Serial.println(F("HATA: Uygulanabilir kalibrasyon adayi yok."));
+        break;
+    default:
+        Serial.print(F("HATA: "));
+        Serial.println(SerialProtocol::errorName(errorCode));
+        break;
+    }
+}
+
+bool writeMachineTelemetry(const uint32_t sequence, const bool nonBlocking)
+{
+    const MotorControl::SystemState state = MotorControl::getState();
+    char line[256] = {};
+
+    // Alan sirasi protokol V1'in sozlesmesidir:
+    // uptime, sequence, armed, feedbackReady, timeout, countlar, hedef/olcum rad/s,
+    // sanal direksiyon rad ve PWM'ler. Birimler metin degil bu sabit sirayla tasinir.
+    const int length = std::snprintf(
+        line, sizeof(line),
+        "V%u TEL %lu %lu %u %u %u %ld %ld %.4f %.4f %.4f %.4f %.4f %u %u\n",
+        PROTOCOL_VERSION, static_cast<unsigned long>(millis()),
+        static_cast<unsigned long>(sequence), state.armed ? 1U : 0U,
+        state.feedbackReady ? 1U : 0U, state.commandTimedOut ? 1U : 0U,
+        static_cast<long>(state.left.encoderCount), static_cast<long>(state.right.encoderCount),
+        state.left.targetRadS, state.right.targetRadS,
+        state.left.measuredRadS, state.right.measuredRadS,
+        lastTargets.steeringAngleRad, state.left.pwm, state.right.pwm);
+
+    if (length <= 0 || length >= static_cast<int>(sizeof(line)))
+    {
+        return false;
+    }
+    if (nonBlocking && Serial.availableForWrite() < length)
+    {
+        // Periyodik telemetry bilgi amaclidir; UART doluysa kontrol dongusunu
+        // bekletmek yerine bu ornek atlanir. STATUS cevabi ise bloklayabilir.
+        return false;
+    }
+
+    Serial.write(reinterpret_cast<const uint8_t *>(line), static_cast<size_t>(length));
+    return true;
+}
+
 void printHelp()
 {
-    Serial.println(F("\nKOMUTLAR:"));
+    Serial.println(F("\nINSAN TERMINAL KOMUTLARI:"));
+    Serial.println(F("  HELLO | PING | HELP | STATUS"));
     Serial.println(F("  TWIST <linear_x[m/s]> <angular_z[rad/s]>"));
-    Serial.println(F("  STOP                  : hedefleri sifirla ve PWM'i kes"));
-    Serial.println(F("  STATUS                : tum veri zincirini yaz"));
-    Serial.println(F("  CAL START             : iki encoder baslangic count'unu al"));
-    Serial.println(F("  CAL END               : her teker 10 tur sonra aday CPR hesapla"));
-    Serial.println(F("  CAL APPLY             : aday CPR degerlerini RAM'de uygula"));
-    Serial.println(F("  SIGN <-1|1> <-1|1>    : ileri donuste encoder isaretlerini ata"));
-    Serial.println(F("  GAINS <Kp> <Ki> <Kd>  : olculup ayarlanacak PID kazanimlari"));
-    Serial.println(F("  ARM                    : tum ayarlar hazirsa motor cikisini ac"));
-    Serial.println(F("  DISARM                 : motor cikisini aninda ve kalici kapat"));
+    Serial.println(F("  STOP | ARM | DISARM"));
+    Serial.println(F("  CAL START | CAL END | CAL APPLY"));
+    Serial.println(F("  SIGN <-1|1> <-1|1>"));
+    Serial.println(F("  GAINS <Kp> <Ki> <Kd>"));
+    Serial.println(F("\nMAKINE BICIMI:"));
+    Serial.println(F("  V1 CMD <sequence> <yukaridaki-komut>"));
+    Serial.println(F("  Ornek: V1 CMD 42 TWIST 0.30 0.50"));
+    Serial.println(F("  Cevap: V1 ACK/ERR ...; telemetry: V1 TEL ..."));
     Serial.println(F("\nGuvenli sira: CAL -> SIGN -> GAINS -> ARM -> TWIST."));
     Serial.println(F("ARM sonrasi TWIST en gec 500 ms araliklarla yenilenmelidir."));
 }
 
-void printStatus()
+void printHumanStatus()
 {
-    // State degerle dondurulur; telemetry modul icindeki degiskenleri degistiremez.
     const MotorControl::SystemState state = MotorControl::getState();
     constexpr float DEGREES_PER_RADIAN = 57.2957795131F;
 
     Serial.println(F("\nCMD:"));
-    Serial.print(F("  linear_x       = "));
-    Serial.print(lastLinearXMps, 4);
-    Serial.println(F(" m/s"));
-    Serial.print(F("  angular_z      = "));
-    Serial.print(lastAngularZRadS, 4);
-    Serial.println(F(" rad/s"));
-
+    Serial.printf("  linear_x       = %.4f m/s\n", lastLinearXMps);
+    Serial.printf("  angular_z      = %.4f rad/s\n", lastAngularZRadS);
     Serial.println(F("KINEMATICS:"));
-    Serial.print(F("  valid          = "));
-    Serial.println(lastTargets.valid ? F("true") : F("false"));
-    Serial.print(F("  left_target    = "));
-    Serial.print(lastTargets.leftWheelRadS, 4);
-    Serial.println(F(" rad/s"));
-    Serial.print(F("  right_target   = "));
-    Serial.print(lastTargets.rightWheelRadS, 4);
-    Serial.println(F(" rad/s"));
-    Serial.print(F("  steering       = "));
-    Serial.print(lastTargets.steeringAngleRad, 4);
-    Serial.print(F(" rad = "));
-    Serial.print(lastTargets.steeringAngleRad * DEGREES_PER_RADIAN, 2);
-    Serial.println(F(" deg (yalniz sanal hedef; aktuator yok)"));
-
+    Serial.printf("  valid          = %s\n", lastTargets.valid ? "true" : "false");
+    Serial.printf("  left_target    = %.4f rad/s\n", lastTargets.leftWheelRadS);
+    Serial.printf("  right_target   = %.4f rad/s\n", lastTargets.rightWheelRadS);
+    Serial.printf("  steering       = %.4f rad = %.2f deg (sanal; aktuator yok)\n",
+                  lastTargets.steeringAngleRad,
+                  lastTargets.steeringAngleRad * DEGREES_PER_RADIAN);
     Serial.println(F("ENCODERS:"));
-    Serial.print(F("  left_count     = "));
-    Serial.println(state.left.encoderCount);
-    Serial.print(F("  right_count    = "));
-    Serial.println(state.right.encoderCount);
-    Serial.print(F("  left_speed     = "));
-    Serial.print(state.left.measuredRadS, 4);
-    Serial.println(F(" rad/s"));
-    Serial.print(F("  right_speed    = "));
-    Serial.print(state.right.measuredRadS, 4);
-    Serial.println(F(" rad/s"));
-    Serial.print(F("  CPR L/R        = "));
-    Serial.print(state.left.countsPerWheelRev, 3);
-    Serial.print(F(" / "));
-    Serial.println(state.right.countsPerWheelRev, 3);
-    Serial.print(F("  SIGN L/R       = "));
-    Serial.print(state.left.encoderSign);
-    Serial.print(F(" / "));
-    Serial.println(state.right.encoderSign);
-
+    Serial.printf("  left_count     = %ld\n", static_cast<long>(state.left.encoderCount));
+    Serial.printf("  right_count    = %ld\n", static_cast<long>(state.right.encoderCount));
+    Serial.printf("  left_speed     = %.4f rad/s\n", state.left.measuredRadS);
+    Serial.printf("  right_speed    = %.4f rad/s\n", state.right.measuredRadS);
+    Serial.printf("  CPR L/R        = %.3f / %.3f\n",
+                  state.left.countsPerWheelRev, state.right.countsPerWheelRev);
+    Serial.printf("  SIGN L/R       = %d / %d\n",
+                  state.left.encoderSign, state.right.encoderSign);
     Serial.println(F("CONTROL:"));
-    Serial.print(F("  left_error     = "));
-    Serial.print(state.left.errorRadS, 4);
-    Serial.println(F(" rad/s"));
-    Serial.print(F("  right_error    = "));
-    Serial.print(state.right.errorRadS, 4);
-    Serial.println(F(" rad/s"));
-    Serial.print(F("  left_pwm/dir   = "));
-    Serial.print(state.left.pwm);
-    Serial.print(F(" / "));
-    Serial.println(state.left.direction);
-    Serial.print(F("  right_pwm/dir  = "));
-    Serial.print(state.right.pwm);
-    Serial.print(F(" / "));
-    Serial.println(state.right.direction);
-    Serial.print(F("  ready/armed    = "));
-    Serial.print(state.feedbackReady ? F("true") : F("false"));
-    Serial.print(F(" / "));
-    Serial.println(state.armed ? F("true") : F("false"));
-    Serial.print(F("  cmd_timeout    = "));
-    Serial.println(state.commandTimedOut ? F("true") : F("false"));
+    Serial.printf("  left_error     = %.4f rad/s\n", state.left.errorRadS);
+    Serial.printf("  right_error    = %.4f rad/s\n", state.right.errorRadS);
+    Serial.printf("  left_pwm/dir   = %u / %d\n", state.left.pwm, state.left.direction);
+    Serial.printf("  right_pwm/dir  = %u / %d\n", state.right.pwm, state.right.direction);
+    Serial.printf("  ready/armed    = %s / %s\n",
+                  state.feedbackReady ? "true" : "false", state.armed ? "true" : "false");
+    Serial.printf("  cmd_timeout    = %s\n", state.commandTimedOut ? "true" : "false");
 }
 
-void printPeriodicTelemetryNonBlocking()
+uint8_t startCalibration(const SerialProtocol::Command &command)
 {
-    const MotorControl::SystemState state = MotorControl::getState();
-
-    // Otomatik telemetry tek, kisa bir satira onceden bicimlendirilir. UART'in bos
-    // alanı tum satira yetmiyorsa bu ornek atlanir; Serial.write'in tampon bosalana
-    // kadar bekleyip 100 Hz kontrol dongusunu geciktirmesine izin verilmez. Ayrintili
-    // ve cok satirli veri kullanici STATUS yazdiginda basilir.
-    char line[128] = {};
-    const int length = std::snprintf(
-        line, sizeof(line),
-        "TEL tgt=%.2f/%.2f meas=%.2f/%.2f pwm=%u/%u arm=%d timeout=%d\n",
-        state.left.targetRadS, state.right.targetRadS,
-        state.left.measuredRadS, state.right.measuredRadS,
-        state.left.pwm, state.right.pwm,
-        state.armed ? 1 : 0, state.commandTimedOut ? 1 : 0);
-
-    if (length > 0 && length < static_cast<int>(sizeof(line)) &&
-        Serial.availableForWrite() >= length)
-    {
-        Serial.write(reinterpret_cast<const uint8_t *>(line),
-                     static_cast<size_t>(length));
-    }
-}
-
-void startCalibration()
-{
-    // Kalibrasyon elle yapilir; olcum baslamadan motor cikisini kapatmak zorunludur.
     MotorControl::disarm();
     MotorControl::readEncoderCounts(calibrationStartLeft, calibrationStartRight);
     calibrationActive = true;
     calibrationCandidateReady = false;
-    Serial.println(F("CAL basladi. Motorlar DISARM."));
-    Serial.print(F("Baslangic raw count L/R: "));
-    Serial.print(calibrationStartLeft);
-    Serial.print(F(" / "));
-    Serial.println(calibrationStartRight);
-    Serial.println(F("Her tekeri elle TAM 10 tur cevirin, sonra CAL END yazin."));
+
+    if (command.machineFormat)
+    {
+        Serial.printf("V%u CAL START %lu %ld %ld\n", PROTOCOL_VERSION,
+                      static_cast<unsigned long>(command.sequence),
+                      static_cast<long>(calibrationStartLeft),
+                      static_cast<long>(calibrationStartRight));
+    }
+    else
+    {
+        Serial.println(F("CAL basladi. Motorlar DISARM."));
+        Serial.printf("Baslangic raw count L/R: %ld / %ld\n",
+                      static_cast<long>(calibrationStartLeft),
+                      static_cast<long>(calibrationStartRight));
+        Serial.println(F("Her tekeri elle TAM 10 tur cevirin, sonra CAL END yazin."));
+    }
+    return PROTOCOL_ERROR_NONE;
 }
 
-void finishCalibration()
+uint8_t finishCalibration(const SerialProtocol::Command &command)
 {
     if (!calibrationActive)
     {
-        Serial.println(F("HATA: Once CAL START yazin."));
-        return;
+        return PROTOCOL_ERROR_CALIBRATION_NOT_ACTIVE;
     }
 
     int32_t endLeft = 0;
@@ -183,180 +209,215 @@ void finishCalibration()
     MotorControl::readEncoderCounts(endLeft, endRight);
     const int32_t deltaLeft = endLeft - calibrationStartLeft;
     const int32_t deltaRight = endRight - calibrationStartRight;
-
-    Serial.print(F("Bitis raw count L/R: "));
-    Serial.print(endLeft);
-    Serial.print(F(" / "));
-    Serial.println(endRight);
-    Serial.print(F("Delta count L/R: "));
-    Serial.print(deltaLeft);
-    Serial.print(F(" / "));
-    Serial.println(deltaRight);
-
     calibrationActive = false;
+
     if (deltaLeft == 0 || deltaRight == 0)
     {
         calibrationCandidateReady = false;
-        Serial.println(F("HATA: Iki tekerde de count gorulmedi; aday uygulanmadi."));
-        return;
+        return PROTOCOL_ERROR_CALIBRATION_NOT_READY;
     }
 
-    // abs(delta)/10 yonu kaldirir ve bir tam teker turundeki effective 1x count'u verir.
+    // abs(delta)/10, secilen 1x decoder ile bir tam teker turundeki effective CPR'i
+    // verir. Encoder yonu bu asamada onemsizdir; SIGN komutu ayrica belirlenir.
     candidateLeftCpr = std::fabs(static_cast<float>(deltaLeft)) / CALIBRATION_TURNS;
     candidateRightCpr = std::fabs(static_cast<float>(deltaRight)) / CALIBRATION_TURNS;
     calibrationCandidateReady = true;
-    Serial.print(F("Aday effective CPR L/R: "));
-    Serial.print(candidateLeftCpr, 3);
-    Serial.print(F(" / "));
-    Serial.println(candidateRightCpr, 3);
-    Serial.println(F("Tur sayisini ve sonucu dogruladiysaniz CAL APPLY yazin."));
+
+    if (command.machineFormat)
+    {
+        Serial.printf("V%u CAL CANDIDATE %lu %ld %ld %.3f %.3f\n", PROTOCOL_VERSION,
+                      static_cast<unsigned long>(command.sequence),
+                      static_cast<long>(deltaLeft), static_cast<long>(deltaRight),
+                      candidateLeftCpr, candidateRightCpr);
+    }
+    else
+    {
+        Serial.printf("Delta count L/R: %ld / %ld\n",
+                      static_cast<long>(deltaLeft), static_cast<long>(deltaRight));
+        Serial.printf("Aday effective CPR L/R: %.3f / %.3f\n",
+                      candidateLeftCpr, candidateRightCpr);
+        Serial.println(F("Tur sayisini ve sonucu dogruladiysaniz CAL APPLY yazin."));
+    }
+    return PROTOCOL_ERROR_NONE;
 }
 
-void applyCalibration()
+uint8_t applyCalibration(const SerialProtocol::Command &command)
 {
-    if (!calibrationCandidateReady ||
-        !MotorControl::setCountsPerWheelRevolution(candidateLeftCpr, candidateRightCpr))
+    if (!calibrationCandidateReady)
     {
-        Serial.println(F("HATA: Uygulanabilir aday yok; CAL START/END yapin."));
-        return;
+        return PROTOCOL_ERROR_CALIBRATION_NOT_READY;
     }
+    if (!MotorControl::setCountsPerWheelRevolution(candidateLeftCpr, candidateRightCpr))
+    {
+        return PROTOCOL_ERROR_INVALID_PARAMETER;
+    }
+
     calibrationCandidateReady = false;
-    Serial.println(F("CPR RAM'e uygulandi. Yeniden baslatmada kalici degildir."));
+    if (command.machineFormat)
+    {
+        Serial.printf("V%u CAL APPLIED %lu %.3f %.3f\n", PROTOCOL_VERSION,
+                      static_cast<unsigned long>(command.sequence),
+                      candidateLeftCpr, candidateRightCpr);
+    }
+    else
+    {
+        Serial.println(F("CPR RAM'e uygulandi. Yeniden baslatmada kalici degildir."));
+    }
+    return PROTOCOL_ERROR_NONE;
 }
 
-void handleTwist(const char *line)
+uint8_t executeTwist(const SerialProtocol::Command &command)
 {
-    float linearXMps = 0.0F;
-    float angularZRadS = 0.0F;
-    char trailing = '\0';
-
-    // sscanf iki float'i ayirir. Sondaki %c, beklenmeyen ucuncu token varsa sonucu
-    // 3 yaparak komutu reddetmemizi saglar; boylece yarim/hatalı komut hareket olmaz.
-    if (std::sscanf(line, "TWIST %f %f %c", &linearXMps, &angularZRadS, &trailing) != 2 ||
-        !std::isfinite(linearXMps) || !std::isfinite(angularZRadS))
-    {
-        Serial.println(F("HATA: Ornek kullanim: TWIST 0.20 0.00"));
-        return;
-    }
-
     const VehicleKinematics::Targets targets =
-        VehicleKinematics::calculate(linearXMps, angularZRadS);
-    lastLinearXMps = linearXMps;
-    lastAngularZRadS = angularZRadS;
+        VehicleKinematics::calculate(command.firstFloat, command.secondFloat);
+    lastLinearXMps = command.firstFloat;
+    lastAngularZRadS = command.secondFloat;
     lastTargets = targets;
 
     if (!targets.valid)
     {
-        // Gecersiz Ackermann istegi once mevcut hareketi de durdurur; eski hedefin
-        // calismaya devam etmesine izin verilmez.
+        // Geçersiz Ackermann istegi eski hedefi calistirmaya devam ettirmemelidir.
         MotorControl::stop();
-        Serial.println(F("HATA: Ackermann arac v=0 iken wz!=0 donusu yapamaz. STOP."));
-        return;
+        return PROTOCOL_ERROR_INVALID_KINEMATICS;
     }
 
-    const MotorControl::SystemState state = MotorControl::getState();
-    if (!state.armed)
+    if (!MotorControl::getState().armed)
     {
-        // Matematik DISARM iken denenebilir fakat hedef motor katmanina aktarilmaz.
-        Serial.println(F("KINEMATIK HESAPLANDI; motor DISARM. STATUS ile sonucu gorun."));
-        return;
+        // DISARM durumunda matematik STATUS ile incelenebilir, fakat hedef motor
+        // katmanina aktarilmaz. Makine istemcisi bunu ERR NOT_ARMED olarak gorur.
+        return PROTOCOL_ERROR_NOT_ARMED;
     }
 
     MotorControl::setTargets(targets.leftWheelRadS, targets.rightWheelRadS, millis());
-    Serial.println(F("TWIST kabul edildi. Guvenlik icin komutu <500 ms aralikla yenileyin."));
+    return PROTOCOL_ERROR_NONE;
 }
 
-void handleCommand(const char *line)
+uint8_t executeCommand(const SerialProtocol::Command &command)
 {
-    // strcmp tam eslesme ister; boylece STOPXYZ gibi belirsiz komutlar calismaz.
-    if (std::strcmp(line, "HELP") == 0)
+    switch (command.id)
     {
-        printHelp();
-    }
-    else if (std::strcmp(line, "STATUS") == 0)
-    {
-        printStatus();
-    }
-    else if (std::strcmp(line, "STOP") == 0)
-    {
+    case COMMAND_HELLO:
+        Serial.printf("V%u HELLO OAMR_ESP32_LOW_LEVEL\n", PROTOCOL_VERSION);
+        return PROTOCOL_ERROR_NONE;
+
+    case COMMAND_PING:
+        Serial.printf("V%u PONG %lu\n", PROTOCOL_VERSION,
+                      static_cast<unsigned long>(millis()));
+        return PROTOCOL_ERROR_NONE;
+
+    case COMMAND_HELP:
+        if (!command.machineFormat)
+        {
+            printHelp();
+        }
+        return PROTOCOL_ERROR_NONE;
+
+    case COMMAND_STATUS:
+        if (command.machineFormat)
+        {
+            writeMachineTelemetry(command.sequence, false);
+        }
+        else
+        {
+            printHumanStatus();
+        }
+        return PROTOCOL_ERROR_NONE;
+
+    case COMMAND_TWIST:
+        return executeTwist(command);
+
+    case COMMAND_STOP:
         MotorControl::stop();
         lastLinearXMps = 0.0F;
         lastAngularZRadS = 0.0F;
         lastTargets = VehicleKinematics::calculate(0.0F, 0.0F);
-        Serial.println(F("STOP: hedefler ve PWM sifirlandi."));
-    }
-    else if (std::strcmp(line, "DISARM") == 0)
-    {
+        if (!command.machineFormat)
+        {
+            Serial.println(F("STOP: hedefler ve PWM sifirlandi."));
+        }
+        return PROTOCOL_ERROR_NONE;
+
+    case COMMAND_ARM:
+        if (!MotorControl::arm())
+        {
+            return PROTOCOL_ERROR_FEEDBACK_NOT_READY;
+        }
+        if (!command.machineFormat)
+        {
+            Serial.println(F("ARM basarili. Motor hala STOP; simdi TWIST gonderin."));
+        }
+        return PROTOCOL_ERROR_NONE;
+
+    case COMMAND_DISARM:
         MotorControl::disarm();
-        Serial.println(F("DISARM: fiziksel motor cikisi kapali."));
-    }
-    else if (std::strcmp(line, "ARM") == 0)
-    {
-        Serial.println(MotorControl::arm()
-                           ? F("ARM basarili. Motor hala STOP; simdi TWIST gonderin.")
-                           : F("HATA: ARM olmadi. CPR, SIGN ve GAINS eksik olabilir."));
-    }
-    else if (std::strcmp(line, "CAL START") == 0)
-    {
-        startCalibration();
-    }
-    else if (std::strcmp(line, "CAL END") == 0)
-    {
-        finishCalibration();
-    }
-    else if (std::strcmp(line, "CAL APPLY") == 0)
-    {
-        applyCalibration();
-    }
-    else if (std::strncmp(line, "TWIST ", 6) == 0)
-    {
-        handleTwist(line);
-    }
-    else if (std::strncmp(line, "SIGN ", 5) == 0)
-    {
-        int leftSign = 0;
-        int rightSign = 0;
-        char trailing = '\0';
-        if (std::sscanf(line, "SIGN %d %d %c", &leftSign, &rightSign, &trailing) == 2 &&
-            (leftSign == -1 || leftSign == 1) &&
-            (rightSign == -1 || rightSign == 1) &&
-            MotorControl::setEncoderSigns(static_cast<int8_t>(leftSign),
-                                          static_cast<int8_t>(rightSign)))
+        if (!command.machineFormat)
+        {
+            Serial.println(F("DISARM: fiziksel motor cikisi kapali."));
+        }
+        return PROTOCOL_ERROR_NONE;
+
+    case COMMAND_CALIBRATION_START:
+        return startCalibration(command);
+
+    case COMMAND_CALIBRATION_END:
+        return finishCalibration(command);
+
+    case COMMAND_CALIBRATION_APPLY:
+        return applyCalibration(command);
+
+    case COMMAND_SET_ENCODER_SIGNS:
+        if (!MotorControl::setEncoderSigns(command.firstInteger, command.secondInteger))
+        {
+            return PROTOCOL_ERROR_INVALID_PARAMETER;
+        }
+        if (!command.machineFormat)
         {
             Serial.println(F("Encoder isaretleri uygulandi; guvenlik icin DISARM."));
         }
-        else
+        return PROTOCOL_ERROR_NONE;
+
+    case COMMAND_SET_PID_GAINS:
+        if (!MotorControl::setPidGains(command.firstFloat, command.secondFloat,
+                                       command.thirdFloat))
         {
-            Serial.println(F("HATA: SIGN degerleri yalniz -1 veya 1 olabilir."));
+            return PROTOCOL_ERROR_INVALID_PARAMETER;
         }
-    }
-    else if (std::strncmp(line, "GAINS ", 6) == 0)
-    {
-        float newKp = 0.0F;
-        float newKi = 0.0F;
-        float newKd = 0.0F;
-        char trailing = '\0';
-        if (std::sscanf(line, "GAINS %f %f %f %c", &newKp, &newKi, &newKd, &trailing) == 3 &&
-            MotorControl::setPidGains(newKp, newKi, newKd))
+        if (!command.machineFormat)
         {
             Serial.println(F("PID kazanimlari uygulandi; guvenlik icin DISARM."));
         }
-        else
-        {
-            Serial.println(F("HATA: Kazanimlar >=0 ve en az biri >0 olmali."));
-        }
+        return PROTOCOL_ERROR_NONE;
+
+    default:
+        return PROTOCOL_ERROR_UNKNOWN_COMMAND;
     }
-    else
+}
+
+void dispatchLine(const char *line)
+{
+    const SerialProtocol::ParseResult parsed = SerialProtocol::parseLine(line);
+    if (parsed.errorCode != PROTOCOL_ERROR_NONE)
     {
-        // Hatalı komut hedefi degistirmez; kullanici STOP'u her zaman ayrica verebilir.
-        Serial.println(F("HATA: Bilinmeyen komut. HELP yazin."));
+        writeMachineError(parsed.command, parsed.errorCode);
+        return;
     }
+
+    const uint8_t result = executeCommand(parsed.command);
+    if (result != PROTOCOL_ERROR_NONE)
+    {
+        writeMachineError(parsed.command, result);
+        return;
+    }
+
+    if (parsed.command.machineFormat)
+    {
+        lastMachineSequence = parsed.command.sequence;
+    }
+    writeMachineAcknowledgement(parsed.command);
 }
 
 void readSerialNonBlocking()
 {
-    // available() kadar byte okunur; veri yoksa fonksiyon beklemez. Bu sayede seri
-    // giris kontrol dongusunun sabit ornekleme zamanini bozmaz.
     while (Serial.available() > 0)
     {
         const char received = static_cast<char>(Serial.read());
@@ -368,21 +429,27 @@ void readSerialNonBlocking()
         {
             if (commandOverflow)
             {
-                Serial.println(F("HATA: Komut satiri cok uzun; yok sayildi."));
+                SerialProtocol::Command overflowCommand{
+                    COMMAND_INVALID, commandMayBeMachineFormat, 0U,
+                    0.0F, 0.0F, 0.0F, 0, 0};
+                writeMachineError(overflowCommand, PROTOCOL_ERROR_LINE_TOO_LONG);
             }
-            else if (commandLength > 0)
+            else if (commandLength > 0U)
             {
                 commandBuffer[commandLength] = '\0';
-                handleCommand(commandBuffer);
+                dispatchLine(commandBuffer);
             }
-            commandLength = 0;
+            commandLength = 0U;
             commandOverflow = false;
+            commandMayBeMachineFormat = false;
             continue;
         }
 
-        // Son byte C string sonlandiricisi '\0' icin ayrilir. Tasan satirin parcasi
-        // calistirilmaz; newline gelene kadar tamamı guvenli bicimde atilir.
-        if (commandLength < COMMAND_BUFFER_SIZE - 1)
+        if (commandLength == 0U)
+        {
+            commandMayBeMachineFormat = received == 'V';
+        }
+        if (commandLength < PROTOCOL_COMMAND_BUFFER_SIZE - 1U)
         {
             commandBuffer[commandLength++] = received;
         }
@@ -399,17 +466,16 @@ void setup()
     Serial.begin(SERIAL_BAUD);
     MotorControl::begin();
 
-    // Boot'ta begin() cikislari LOW/PWM=0 yapar; kullanici calibration, gains ve ARM
-    // adimlarini tamamlamadan hicbir otomatik sweep veya motor hareketi yapilmaz.
+    // Boot'ta MotorControl PWM=0 ve DISARM uygular. Bu duyuru bilgi amaclidir;
+    // motor hareketi ancak CPR, SIGN, GAINS, ARM ve gecerli TWIST zinciriyle mumkundur.
     Serial.println();
     Serial.println(F("ESP32 iki motor low-level egitim sistemi hazir."));
+    Serial.printf("V%u HELLO OAMR_ESP32_LOW_LEVEL\n", PROTOCOL_VERSION);
     Serial.println(F("Motorlar DISARM ve STOP. Komutlar icin HELP yazin."));
 }
 
 void loop()
 {
-    // micros() kontrol dt'si icin daha ince, millis() timeout/telemetry icin yeterli
-    // cozunurluk sunar. Her ikisi de unsigned tasma-guvenli cikarma ile kullanilir.
     const uint32_t nowMicros = micros();
     const uint32_t nowMillis = millis();
 
@@ -419,6 +485,6 @@ void loop()
     if (nowMillis - lastTelemetryMs >= TELEMETRY_PERIOD_MS)
     {
         lastTelemetryMs = nowMillis;
-        printPeriodicTelemetryNonBlocking();
+        writeMachineTelemetry(lastMachineSequence, true);
     }
 }
