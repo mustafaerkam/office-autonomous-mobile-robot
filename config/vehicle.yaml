@@ -1,0 +1,50 @@
+# OAMR aracinin fiziksel ve guvenlik parametreleri icin insan-okunur ana referans.
+#
+# Bu dosya Raspberry Pi/ROS 2 tarafinin okuyacagi YAML kaynagidir. ESP32 Arduino
+# derleyicisi YAML okuyamadigi icin ayni derleme-zamani gerekli degerler
+# `oamr-esp32-firmware/include/vehicle_config.h` icinde tutulur. Bir parametreyi
+# degistirirken iki dosya birlikte guncellenmelidir; ileride bu YAML'dan header
+# uretilerek bu elle esleme kaldirilabilir.
+#
+# Tum uzunluklar metre, acilar radyan, hizlar metre/saniye veya radyan/saniye ve
+# zamanlar milisaniye cinsindendir. Bu birimler ROS 2, odometri ve ESP32'nin ayni
+# fiziksel robot tanimini kullanmasini saglar.
+
+vehicle:
+  name: oamr
+  config_version: 1
+  drive_model: rear_wheel_ackermann
+
+geometry:
+  # Mevcut ESP32 Ackermann hesabinda kullanilan degerlerdir. Fiziksel olcum ve
+  # yuk altindaki surus testinden sonra teyit edilmelidir.
+  wheel_radius_m: 0.035
+  wheel_diameter_m: 0.070
+  wheelbase_m: 0.170
+  rear_track_m: 0.150
+
+steering:
+  # Direksiyon aktuatoru ve mekanik limitler henuz sisteme bagli degildir.
+  # null, bu degerlerin olculmeden ROS 2/Nav2 tarafinda kullanilamayacagini anlatir.
+  max_steering_angle_rad: null
+  steering_center_rad: null
+
+wheel_feedback:
+  # CPR ve yonler kalibrasyonla belirlenecektir. ESP32, bu degerler tanimlanmadan
+  # ARM komutunu kabul etmez; bu nedenle burada varsayilan bir deger verilmez.
+  left_counts_per_wheel_revolution: null
+  right_counts_per_wheel_revolution: null
+  left_encoder_sign: null
+  right_encoder_sign: null
+
+safety:
+  # Raspberry Pi veya seri baglanti hareket komutu gondermeyi birakinca ESP32'nin
+  # motor hedeflerini sifirlamadan once bekleyecegi en uzun sure.
+  command_timeout_ms: 500
+
+calibration_notes:
+  # Bu alanlar yazilimin kullandigi parametre degil, saha olcum kaydidir.
+  # Kalibrasyon tamamlaninca tarih, yontem ve sonuc burada dokumante edilmelidir.
+  geometry_verified: false
+  last_verified_at: null
+  notes: "Direksiyon aktuatörü ve geri bildirim sensörü henüz eklenmedi."

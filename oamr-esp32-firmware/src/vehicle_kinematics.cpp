@@ -1,5 +1,7 @@
 #include "vehicle_kinematics.h"
 
+#include "vehicle_config.h"
+
 #include <cmath>
 
 namespace VehicleKinematics
@@ -41,18 +43,19 @@ Targets calculate(const float linearXMps, const float angularZRadS)
     // Arac merkezinin donus yaricapi R=v/w'dir. Sol ve sag teker merkezleri R'nin
     // iki yaninda track_width/2 kadar uzakta oldugundan v_left/right = v +/- wz*L/2
     // olur. Bu fark virajda dis tekerin daha hizli donmesini saglar.
-    const float halfTrackM = TRACK_WIDTH_M * 0.5F;
+    const float halfTrackM = VehicleConfig::REAR_TRACK_M * 0.5F;
     const float leftLinearMps = linearXMps - (angularZRadS * halfTrackM);
     const float rightLinearMps = linearXMps + (angularZRadS * halfTrackM);
 
     // v = omega*r oldugu icin metre/saniye cinsinden teker cevresel hizini yaricapa
     // bolerek rad/s cinsinden acisal hiza ceviriyoruz. Yaricap sabit ve sifirdan buyuk.
-    result.leftWheelRadS = leftLinearMps / WHEEL_RADIUS_M;
-    result.rightWheelRadS = rightLinearMps / WHEEL_RADIUS_M;
+    result.leftWheelRadS = leftLinearMps / VehicleConfig::WHEEL_RADIUS_M;
+    result.rightWheelRadS = rightLinearMps / VehicleConfig::WHEEL_RADIUS_M;
 
     // Bicycle modelinde delta=atan(L*wz/v). Bu deger yalniz telemetry'dir; projede
     // direksiyon servo/aktuatoru olmadigi icin hicbir GPIO bu degerle surulmez.
-    result.steeringAngleRad = std::atan((WHEELBASE_M * angularZRadS) / linearXMps);
+    result.steeringAngleRad =
+        std::atan((VehicleConfig::WHEELBASE_M * angularZRadS) / linearXMps);
     return result;
 }
 }  // namespace VehicleKinematics

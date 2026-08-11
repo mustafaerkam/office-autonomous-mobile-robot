@@ -1,5 +1,7 @@
 #include "motor_control.h"
 
+#include "vehicle_config.h"
+
 #include <cmath>
 
 namespace MotorControl
@@ -36,7 +38,6 @@ constexpr float MAX_PWM = 255.0F;
 // 10 ms kontrol periyodu 100 Hz demektir. Hiz olcumu ve integral/turev hesaplarinin
 // anlamli olmasi icin duzenli ornekleme gerekir. Telemetry bundan daha yavas basilir.
 constexpr uint32_t CONTROL_PERIOD_US = 10000;
-constexpr uint32_t COMMAND_TIMEOUT_MS = 500;
 constexpr float RADIANS_PER_REVOLUTION = 6.28318530718F;
 constexpr float ZERO_TARGET_RAD_S = 1.0e-4F;
 
@@ -276,7 +277,7 @@ void update(const uint32_t nowMicros, const uint32_t nowMillis)
 
     // Yalniz yeni ve gecerli hareket komutlari timeout saatini yeniler. Yaklasik
     // 500 ms komutsuzlukta hedefler sifirlanir ve PWM hemen kesilir.
-    if (armed && (nowMillis - lastCommandMs > COMMAND_TIMEOUT_MS))
+    if (armed && (nowMillis - lastCommandMs > VehicleConfig::COMMAND_TIMEOUT_MS))
     {
         commandTimedOut = true;
         leftState.targetRadS = 0.0F;

@@ -8,12 +8,6 @@
 // bilgisayarda bile donanimdan bagimsiz test edilebilmesini saglar.
 namespace VehicleKinematics
 {
-// constexpr, degerin calisma sirasinda degismeyecegini ve derleme aninda bilindigini
-// anlatir. Boyle fiziksel sabitleri tek yerde tutmak birim hatalarini azaltir.
-constexpr float WHEEL_RADIUS_M = 0.035F;
-constexpr float TRACK_WIDTH_M = 0.15F;
-constexpr float WHEELBASE_M = 0.17F;
-
 // struct, ayni hesaplamaya ait birden cok sonucu tek anlamli veri paketi halinde
 // dondurur. float ESP32'de yeterli hassasiyetle daha az bellek/islem maliyeti sunar.
 struct Targets
