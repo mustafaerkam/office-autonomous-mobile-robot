@@ -51,6 +51,25 @@ bool hasOnlyTwoSigns(const char *arguments, int8_t &first, int8_t &second)
     return true;
 }
 
+bool hasValidJogArguments(const char *arguments, int8_t &wheel, int8_t &direction,
+                          float &pwmMagnitude, float &durationMs)
+{
+    int wheelValue = 0;
+    int directionValue = 0;
+    char trailing = '\0';
+    if (std::sscanf(arguments, " %d %d %f %f %c", &wheelValue, &directionValue,
+                    &pwmMagnitude, &durationMs, &trailing) != 4 ||
+        (wheelValue != WHEEL_LEFT && wheelValue != WHEEL_RIGHT) ||
+        (directionValue != -1 && directionValue != 1) ||
+        !std::isfinite(pwmMagnitude) || !std::isfinite(durationMs))
+    {
+        return false;
+    }
+    wheel = static_cast<int8_t>(wheelValue);
+    direction = static_cast<int8_t>(directionValue);
+    return true;
+}
+
 bool parseCalibrationAction(const char *arguments, int8_t &action)
 {
     if (std::strcmp(arguments, " START") == 0 || std::strcmp(arguments, " start") == 0)
@@ -138,6 +157,19 @@ ParseResult parsePayload(const char *payload, Command command)
         }
         command.id = CALIBRATION;
     }
+    else if (std::strncmp(payload, "JOG ", 4) == 0)
+    {
+        int8_t wheel = 0;
+        int8_t direction = 0;
+        if (!hasValidJogArguments(payload + 3, wheel, direction,
+                                  command.firstFloat, command.secondFloat))
+        {
+            return makeResult(command, PROTOCOL_ERROR_FORMAT);
+        }
+        command.firstInteger = wheel;
+        command.secondInteger = direction;
+        command.id = JOG;
+    }
     // Referanstaki commands.h mantigi: ilk karakter dogrudan seri komuttur.
     // Bu blok, "t 0.30 0.50" gibi kisa komutlari uzun isimli alias'larla ayni
     // Command yapisina donusturur. Boylece iki ayri motor kontrol yolu oluşmaz.
@@ -191,6 +223,19 @@ ParseResult parsePayload(const char *payload, Command command)
                 return makeResult(command, PROTOCOL_ERROR_FORMAT);
             }
             command.id = CALIBRATION;
+        }
+        else if (shortCommand == JOG)
+        {
+            int8_t wheel = 0;
+            int8_t direction = 0;
+            if (!hasValidJogArguments(arguments, wheel, direction,
+                                      command.firstFloat, command.secondFloat))
+            {
+                return makeResult(command, PROTOCOL_ERROR_FORMAT);
+            }
+            command.firstInteger = wheel;
+            command.secondInteger = direction;
+            command.id = JOG;
         }
         else
         {
@@ -259,6 +304,7 @@ const char *commandName(const uint8_t commandId)
     case CALIBRATION: return "CAL";
     case SET_ENCODER_SIGNS: return "SIGN";
     case SET_PID_GAINS: return "GAINS";
+    case JOG: return "JOG";
     default: return "INVALID";
     }
 }

@@ -19,6 +19,11 @@
 #define CALIBRATION              'c'
 #define SET_ENCODER_SIGNS        'n'
 #define SET_PID_GAINS            'g'
+// JOG, kalibrasyon ve ARM gerektirmeyen acik-cevrim tezgah komutudur. PWM ve sure
+// tavanlari motor_control.cpp icinde sabittir ve sure dolunca cikis kendiliginden
+// kesilir. Amaci "motor donuyor mu, encoder sayiyor mu" sorusunu PID devreye
+// girmeden yanitlamaktir.
+#define JOG                      'j'
 
 // CAL tek karakterli bir komuttur; ikinci kelime hangi kalibrasyon asamasinin
 // istendigini belirtir. Ornekler: "c start", "c end" ve "c apply".

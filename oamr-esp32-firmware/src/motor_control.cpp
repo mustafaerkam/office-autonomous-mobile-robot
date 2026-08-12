@@ -1,5 +1,6 @@
 #include "motor_control.h"
 
+#include "commands.h"
 #include "vehicle_config.h"
 
 #include <cmath>
@@ -10,12 +11,24 @@ namespace
 {
 // Pin sabitleri kablo semasinin yazilim karsiligidir. constexpr kullanmak yanlislikla
 // calisma aninda degistirilmelerini engeller ve pin eslesmesini tek yerde toplar.
-constexpr uint8_t LEFT_ENCODER_A_PIN = 16;
-constexpr uint8_t LEFT_ENCODER_B_PIN = 17;
+//
+// SOL MOTOR (1. motor) -- fiziksel olarak baglanmis ve olculmustur:
+//   encoder B  -> GPIO16      encoder A  -> GPIO17
+//   surucu IN1 -> GPIO18      surucu IN2 -> GPIO19
+//   surucu ENA -> GPIO25
+//   Motorun (-) ucu OUT1'e, (+) ucu OUT2'ye baglidir. Bu, IN1=HIGH iken motorun
+//   hangi yone donecegini belirler; "ileri" olup olmadigi ancak yon testiyle
+//   anlasilir. Ters cikarsa OUT1/OUT2 kablolari fiziksel olarak degistirilmelidir.
+constexpr uint8_t LEFT_ENCODER_A_PIN = 17;
+constexpr uint8_t LEFT_ENCODER_B_PIN = 16;
 constexpr uint8_t LEFT_IN1_PIN = 18;
 constexpr uint8_t LEFT_IN2_PIN = 19;
+// GPIO25 strapping pini degildir ve boot sirasinda serbest kalir; ENA icin GPIO5'e
+// gore daha guvenli bir secimdir (GPIO5 boot boyunca dahili pull-up ile HIGH durur).
 constexpr uint8_t LEFT_PWM_PIN = 25;
 
+// SAG MOTOR (2. motor) -- henuz fiziksel olarak baglanmadi; asagidaki degerler
+// planlanan pinlerdir ve kablolama yapilinca dogrulanmalidir.
 constexpr uint8_t RIGHT_ENCODER_A_PIN = 32;
 constexpr uint8_t RIGHT_ENCODER_B_PIN = 33;
 constexpr uint8_t RIGHT_IN1_PIN = 26;
@@ -47,6 +60,7 @@ constexpr float ZERO_TARGET_RAD_S = 1.0e-4F;
 volatile int32_t leftEncoderCount = 0;
 volatile int32_t rightEncoderCount = 0;
 
+
 // Iki ISR ve normal program ayni sayac verisine ulasirken bu kilit cok kisa sure
 // tutulur. ESP32'nin iki cekirdeginde yalniz interrupts() kullanmaktan daha guvenlidir.
 portMUX_TYPE encoderMux = portMUX_INITIALIZER_UNLOCKED;
@@ -74,9 +88,17 @@ bool commandTimedOut = true;
 uint32_t lastCommandMs = 0;
 uint32_t previousControlUs = 0;
 
+// Jog tavanlari kasitli olarak MAX_PWM'in ve komut zaman asiminin altindadir:
+// tezgahta motoru gormeye yeter, kacak bir komut zarar veremez.
+constexpr uint8_t JOG_MAX_PWM = 200U;
+constexpr uint32_t JOG_MAX_DURATION_MS = 2000U;
+bool jogActive = false;
+uint32_t jogStartMillis = 0;
+uint32_t jogDurationMs = 0;
+
 // ISR (interrupt service routine) encoder A'nin yalniz RISING kenarinda calisir.
 // B seviyesine bakarak yon secmek "1x decoding"dir: A'nin iki kenari ve B kenarlari
-// sayilmaz. Bu nedenle kalibre edilecek effective CPR tam olarak bu 1x yonteme aittir.
+// sayilmaz. Bu nedenle kalibre edilen effective CPR tam olarak bu 1x yonteme aittir.
 // IRAM_ATTR, fonksiyonu flash erisiminin gecici olarak kullanilamadigi anda da hizli
 // erisilebilen RAM bolgesine yerlestirmesini ister. ISR'da Serial, delay, PID veya
 // floating-point hesap yoktur; interrupt gecikmesini kisa tutar.
@@ -197,6 +219,7 @@ float runPid(WheelState &state, ControllerMemory &memory, const float dtSeconds)
     memory.previousError = state.errorRadS;
     return saturatedOutput;
 }
+
 }  // namespace
 
 void begin()
@@ -221,16 +244,18 @@ void begin()
     hardStopOutputs();
 
     // INPUT_PULLUP acik-kollektor olabilen encoder cikisini bosta kalmaktan korur.
-    // A fazinin RISING kenari interrupt kaynagidir; B fazi ISR icinde yon icin okunur.
     pinMode(LEFT_ENCODER_A_PIN, INPUT_PULLUP);
     pinMode(LEFT_ENCODER_B_PIN, INPUT_PULLUP);
     pinMode(RIGHT_ENCODER_A_PIN, INPUT_PULLUP);
     pinMode(RIGHT_ENCODER_B_PIN, INPUT_PULLUP);
+
+    // A fazinin RISING kenari interrupt kaynagidir; B fazi ISR icinde yon icin okunur.
     attachInterrupt(digitalPinToInterrupt(LEFT_ENCODER_A_PIN), leftEncoderIsr, RISING);
     attachInterrupt(digitalPinToInterrupt(RIGHT_ENCODER_A_PIN), rightEncoderIsr, RISING);
 
     readEncoderCounts(leftController.previousCount, rightController.previousCount);
     previousControlUs = micros();
+
 }
 
 void update(const uint32_t nowMicros, const uint32_t nowMillis)
@@ -273,6 +298,19 @@ void update(const uint32_t nowMicros, const uint32_t nowMillis)
         rightState.measuredRadS =
             (static_cast<float>(deltaRight * rightState.encoderSign) /
              rightState.countsPerWheelRev) * RADIANS_PER_REVOLUTION / dtSeconds;
+    }
+
+    // Jog aktifken normal armed/PID yolu calistirilmaz; aksi halde asagidaki
+    // "!armed" dali jog'un yazdigi PWM'i bir sonraki 10 ms tikte sifirlardi.
+    // Sure dolunca cikislar kesilir ve normal akisa donulur.
+    if (jogActive)
+    {
+        if (nowMillis - jogStartMillis >= jogDurationMs)
+        {
+            hardStopOutputs();
+            jogActive = false;
+        }
+        return;
     }
 
     // Yalniz yeni ve gecerli hareket komutlari timeout saatini yeniler. Yaklasik
@@ -382,6 +420,40 @@ bool setPidGains(const float newKp, const float newKi, const float newKd)
     ki = newKi;
     kd = newKd;
     gainsConfigured = true;
+    return true;
+}
+
+bool jog(const uint8_t wheel, const int8_t direction, const uint8_t pwmMagnitude,
+         const uint32_t durationMs, const uint32_t nowMillis)
+{
+    // Sinirlar cagirandan bagimsiz olarak burada zorlanir; hicbir dispatcher
+    // hatasi bu tavanlarin ustune cikamaz.
+    if ((wheel != WHEEL_LEFT && wheel != WHEEL_RIGHT) ||
+        (direction != -1 && direction != 1) ||
+        pwmMagnitude == 0U || pwmMagnitude > JOG_MAX_PWM ||
+        durationMs == 0U || durationMs > JOG_MAX_DURATION_MS)
+    {
+        return false;
+    }
+
+    // disarm() PID/ARM durumunu ve mevcut cikislari guvenle kapatir; jog PWM'i
+    // ondan sonra dogrudan yazilir.
+    disarm();
+
+    WheelState &state = (wheel == WHEEL_LEFT) ? leftState : rightState;
+    const uint8_t in1 = (wheel == WHEEL_LEFT) ? LEFT_IN1_PIN : RIGHT_IN1_PIN;
+    const uint8_t in2 = (wheel == WHEEL_LEFT) ? LEFT_IN2_PIN : RIGHT_IN2_PIN;
+    const uint8_t channel = (wheel == WHEEL_LEFT) ? LEFT_PWM_CHANNEL : RIGHT_PWM_CHANNEL;
+
+    state.direction = direction;
+    state.pwm = pwmMagnitude;
+    digitalWrite(in1, direction > 0 ? HIGH : LOW);
+    digitalWrite(in2, direction > 0 ? LOW : HIGH);
+    ledcWrite(channel, pwmMagnitude);
+
+    jogActive = true;
+    jogStartMillis = nowMillis;
+    jogDurationMs = durationMs;
     return true;
 }
 

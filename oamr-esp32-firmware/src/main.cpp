@@ -130,6 +130,7 @@ void printHelp()
     Serial.println(F("  CAL/c START | END | APPLY"));
     Serial.println(F("  SIGN/n <-1|1> <-1|1>"));
     Serial.println(F("  GAINS/g <Kp> <Ki> <Kd>"));
+    Serial.println(F("  JOG/j <teker 0|1> <yon -1|1> <pwm 1-200> <ms 1-2000>"));
     Serial.println(F("\nMAKINE BICIMI:"));
     Serial.println(F("  V1 CMD <sequence> <yukaridaki-komut>"));
     Serial.println(F("  Ornek: V1 CMD 42 TWIST 0.30 0.50"));
@@ -393,6 +394,22 @@ uint8_t executeCommand(const SerialProtocol::Command &command)
             Serial.println(F("PID kazanimlari uygulandi; guvenlik icin DISARM."));
         }
         return PROTOCOL_ERROR_NONE;
+
+    case JOG:
+    {
+        if (!MotorControl::jog(static_cast<uint8_t>(command.firstInteger),
+                               command.secondInteger,
+                               static_cast<uint8_t>(command.firstFloat),
+                               static_cast<uint32_t>(command.secondFloat), millis()))
+        {
+            return PROTOCOL_ERROR_INVALID_PARAMETER;
+        }
+        if (!command.machineFormat)
+        {
+            Serial.println(F("JOG basladi; sure dolunca otomatik durur."));
+        }
+        return PROTOCOL_ERROR_NONE;
+    }
 
     default:
         return PROTOCOL_ERROR_UNKNOWN_COMMAND;

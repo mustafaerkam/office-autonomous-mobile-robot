@@ -53,6 +53,12 @@ bool setEncoderSigns(int8_t leftSign, int8_t rightSign);
 // sayilmaz; sifir varsayilan deger motorun kazara calismamasini saglar.
 bool setPidGains(float kp, float ki, float kd);
 
+// Acik-cevrim tezgah darbesi: CPR/SIGN/GAINS/ARM zincirini atlar, PID calistirmaz.
+// PWM buyuklugu ve sure motor_control.cpp icindeki tavanlarla sinirlanir; sure
+// dolunca cikislar otomatik kesilir. Once mevcut kontrolu disarm eder.
+bool jog(uint8_t wheel, int8_t direction, uint8_t pwmMagnitude, uint32_t durationMs,
+         uint32_t nowMillis);
+
 // Encoder sayaclari ISR tarafindan degistigi icin tutarli kopya critical section'da
 // alinir. Reference (&) cikislari iki degeri tek fonksiyonla kopyalamaya yarar.
 void readEncoderCounts(int32_t &leftCount, int32_t &rightCount);
