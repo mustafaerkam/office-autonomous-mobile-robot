@@ -1,0 +1,59 @@
+# OAMR ROS 2 calisma zamani parametreleri.
+#
+# Fiziksel degerler projedeki ana referans olan config/vehicle.yaml ile ayni
+# anlami tasir. ROS 2 parametre dosyalarinin kendi bicimi oldugu icin (node adi ->
+# ros__parameters) o dosya dogrudan okunamaz; bir geometri degeri degistiginde
+# bu dosya, config/vehicle.yaml ve oamr-esp32-firmware/include/vehicle_config.h
+# birlikte guncellenmelidir.
+#
+# Birimler: metre, radyan, m/s, rad/s, saniye.
+
+oamr_serial_bridge:
+  ros__parameters:
+    # Gercek donanimda ESP32'nin CP210x koprusu genelde /dev/ttyUSB0 olur.
+    # Kalici bir isim icin udev kurali yazilabilir (ornegin /dev/oamr-esp32).
+    serial_port: "/dev/ttyUSB0"
+    baudrate: 115200
+
+    # Firmware'in komut zaman asimi 500 ms'dir. 20 Hz gonderim buna genis bir
+    # emniyet payi birakir; her komut arasi 50 ms olur.
+    command_rate_hz: 20.0
+
+    # ROS tarafi susarsa firmware'in kendi 500 ms'ini beklemeden sifir gonderilir.
+    cmd_vel_timeout_s: 0.4
+
+    # Bridge'de geometri parametresi yoktur: kinematik donusumu firmware yapar,
+    # bu node Twist'i oldugu gibi iletir. Fiziksel degerler yalniz teleop'ta
+    # (Ackermann donusumu icin) ve firmware'de bulunur.
+    left_wheel_joint: "rear_left_wheel_joint"
+    right_wheel_joint: "rear_right_wheel_joint"
+
+oamr_ackermann_teleop:
+  ros__parameters:
+    wheelbase_m: 0.170
+
+    # Bench ve ilk saha testleri icin bilerek dusuk tutuldu. Arac guvenle
+    # surulduce artirilabilir.
+    max_linear_speed_mps: 0.40
+    linear_step_mps: 0.05
+
+    # Direksiyon aktuatoru henuz olculmedigi icin bu deger bir tahmindir
+    # (yaklasik 30 derece). Mekanik limit olculunce config/vehicle.yaml'daki
+    # steering.max_steering_angle_rad ile birlikte guncellenmelidir.
+    max_steering_angle_rad: 0.52
+    steering_step_rad: 0.05
+
+    publish_rate_hz: 20.0
+
+    # Terminal tus birakma olayini goremez; isletim sisteminin tus tekrari
+    # kesilince bu sure sonunda komut sifirlanir. Cok kucuk deger takilmaya,
+    # cok buyuk deger gec durmaya yol acar.
+    key_hold_timeout_s: 0.25
+
+    # true: tus birakilinca direksiyon merkeze doner (klavye icin daha guvenli).
+    # false: son aci korunur, gercek bir direksiyon gibi davranir.
+    steering_returns_to_center: true
+
+    # Hiz rampasi (m/s^2). Ani sicramalar hem aktarma organlarini hem
+    # H-koprusunu zorlar; PID'in de takip etmesi kolaylasir.
+    linear_slew_mps2: 0.8

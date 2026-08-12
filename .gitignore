@@ -8,3 +8,8 @@
 oamr-ros2-ws/build/
 oamr-ros2-ws/install/
 oamr-ros2-ws/log/
+
+# Python bytecode ve paketleme artiklari
+__pycache__/
+*.py[cod]
+*.egg-info/
